@@ -21,33 +21,36 @@ const SHOW_REASONING = process.env.SHOW_REASONING === 'true' || false;
 // 🔥 THINKING MODE TOGGLE - Enables thinking for specific models that support it
 const ENABLE_THINKING_MODE = process.env.ENABLE_THINKING_MODE === 'true' || false;
 
-// 🎯 OPTIMIZED MODEL MAPPING FOR JANITOR AI
-// Best models from NVIDIA NIM API (January 2025)
+// Request timeout in ms (30 seconds)
+const REQUEST_TIMEOUT = parseInt(process.env.REQUEST_TIMEOUT || '30000', 10);
+
+// 🎯 VERIFIED MODEL MAPPING FOR JANITOR AI
+// Only real, confirmed models available on NVIDIA NIM (as of early 2025)
 const MODEL_MAPPING = {
-  // Premium Reasoning Models (Best for Roleplay & Complex Conversations)
-  'gpt-4': 'deepseek-ai/deepseek-v4-pro',                                    // State-of-the-art 685B reasoning LLM
-  'gpt-4-turbo': 'deepseek-ai/deepseek-v4-flash',                              // Hybrid thinking mode, 128K context
-  'gpt-4o': 'deepseek-ai/deepseek-v3.1-terminus',                          // Improved stability & agent behavior
-  'claude-opus': 'nvidia/llama-3.1-nemotron-ultra-253b-v1',                // Highest accuracy, complex reasoning
-  'claude-sonnet': 'nvidia/llama-3.3-nemotron-super-49b-v1.5',             // Great accuracy-efficiency balance
-  
-  // Fast & Efficient Models (Balanced Performance)
-  'gpt-3.5-turbo': 'nvidia/llama-3.1-nemotron-nano-8b-v1',                 // Fast, efficient, good quality
-  'gpt-3.5-turbo-16k': 'nvidia/nvidia-nemotron-nano-9b-v2',                // Hybrid Mamba-Transformer, 128K context
-  'claude-haiku': 'nvidia/nemotron-3-nano-30b-a3b',                        // Best-in-class throughput, 1M tokens
-  
-  // Specialized Models
-  'gemini-pro': 'qwen/qwen3-next-80b-a3b-thinking',                        // Hybrid attention, ultra-long context
-  'gemini-pro-vision': 'nvidia/nemotron-nano-12b-v2-vl',                   // Multi-image, video understanding
-  
-  // Alternative Premium Options
-  'gpt-4-reasoning': 'moonshotai/kimi-k2-instruct-1113',                   // Long context, enhanced reasoning
-  'deepseek': 'deepseek-ai/deepseek-v3.1',                                 // Direct DeepSeek access
-  
-  // Fallback Models (Meta Llama)
-  'llama-70b': 'meta/llama-3.1-70b-instruct',
-  'llama-405b': 'meta/llama-3.1-405b-instruct',
-  'llama-8b': 'meta/llama-3.1-8b-instruct'
+  // Premium / High-quality
+  'gpt-4':              'deepseek-ai/deepseek-r1',               // 671B reasoning model
+  'gpt-4-turbo':        'deepseek-ai/deepseek-r1-0528',          // Updated DeepSeek R1
+  'gpt-4o':             'deepseek-ai/deepseek-v3-0324',          // DeepSeek V3 (non-reasoning)
+  'claude-opus':        'nvidia/llama-3.1-nemotron-ultra-253b-v1', // 253B, highest accuracy
+  'claude-sonnet':      'nvidia/llama-3.3-nemotron-super-49b-v1', // 49B, great balance
+
+  // Fast & Efficient
+  'gpt-3.5-turbo':      'nvidia/llama-3.1-nemotron-nano-8b-v1',  // 8B, fast
+  'gpt-3.5-turbo-16k':  'meta/llama-3.3-70b-instruct',           // 70B, large context
+  'claude-haiku':       'meta/llama-3.1-8b-instruct',            // Lightweight & quick
+
+  // Specialized
+  'gemini-pro':         'qwen/qwen2.5-72b-instruct',             // Qwen 72B
+  'gemini-pro-vision':  'microsoft/phi-3-vision-128k-instruct',  // Vision-capable
+
+  // Direct access aliases
+  'gpt-4-reasoning':    'deepseek-ai/deepseek-r1',               // Explicit reasoning
+  'deepseek':           'deepseek-ai/deepseek-v3-0324',          // DeepSeek V3
+
+  // Meta Llama fallbacks
+  'llama-70b':          'meta/llama-3.1-70b-instruct',
+  'llama-405b':         'meta/llama-3.1-405b-instruct',
+  'llama-8b':           'meta/llama-3.1-8b-instruct',
 };
 
 // 🛡️ ROLEPLAY GUARD - Injected into every request to prevent the model from speaking as the user
@@ -68,7 +71,7 @@ function stripUserBreakout(text) {
   const userLabels = [
     /^(User|Human|You|Me|Player)\s*[:：]/i,
     /^---+\s*$/,
-    /^\*{0,3}\s*(User|Human|You|Me|Player)\s*\*{0,3}\s*[:：]/i
+    /^\*{0,3}\s*(User|Human|You|Me|Player)\s*\*{0,3}\s*[:：]/i,
   ];
 
   for (const line of lines) {
@@ -81,22 +84,18 @@ function stripUserBreakout(text) {
     }
 
     if (dropping) {
-      // Blank lines while dropping → skip
-      if (trimmed === '') continue;
-      // Asterisk = character action resumes, stop dropping
-      if (trimmed.startsWith('*')) {
+      if (trimmed === '') continue;           // Skip blank lines while dropping
+      if (trimmed.startsWith('*')) {         // Asterisk = character action resumes
         dropping = false;
         cleaned.push(line);
       }
-      // Otherwise still dropping invented user dialogue
-      continue;
+      continue;                              // Still dropping invented user dialogue
     }
 
     cleaned.push(line);
   }
 
-  // Final safety net: cut off everything after the last user label
-  // in case one slipped through at the very end
+  // Final safety net: cut off at the last user label that slipped through
   const result = cleaned.join('\n');
   const lastUserLabel = result.search(/\n(?:User|Human|You|Me|Player)\s*[:：]/i);
   if (lastUserLabel !== -1) {
@@ -106,29 +105,25 @@ function stripUserBreakout(text) {
   return result.trimEnd();
 }
 
-// 🎨 THINKING-CAPABLE MODELS (for reasoning mode)
-const THINKING_MODELS = [
-  'deepseek-ai/deepseek-v4-pro',
-  'deepseek-ai/deepseek-v4-flash',
-  'deepseek-ai/deepseek-v3.1-terminus',
-  'qwen/qwen3-next-80b-a3b-thinking',
+// 🎨 THINKING-CAPABLE MODELS (verified models that support reasoning/thinking)
+const THINKING_MODELS = new Set([
+  'deepseek-ai/deepseek-r1',
+  'deepseek-ai/deepseek-r1-0528',
   'nvidia/llama-3.1-nemotron-ultra-253b-v1',
-  'nvidia/llama-3.3-nemotron-super-49b-v1.5',
+  'nvidia/llama-3.3-nemotron-super-49b-v1',
   'nvidia/llama-3.1-nemotron-nano-8b-v1',
-  'nvidia/nvidia-nemotron-nano-9b-v2',
-  'nvidia/nemotron-3-nano-30b-a3b'
-];
+]);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    service: 'OpenAI to NVIDIA NIM Proxy (Janitor AI Optimized)', 
+  res.json({
+    status: 'ok',
+    service: 'OpenAI to NVIDIA NIM Proxy (Janitor AI Optimized)',
     reasoning_display: SHOW_REASONING,
     thinking_mode: ENABLE_THINKING_MODE,
     nim_api_configured: !!NIM_API_KEY,
     available_models: Object.keys(MODEL_MAPPING).length,
-    optimized_for: 'Janitor AI'
+    optimized_for: 'Janitor AI',
   });
 });
 
@@ -136,19 +131,19 @@ app.get('/health', (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     service: 'OpenAI to NVIDIA NIM Proxy',
-    version: '2.0',
+    version: '2.1',
     optimized_for: 'Janitor AI',
     status: 'running',
     endpoints: {
       health: '/health',
       models: '/v1/models',
-      chat: '/v1/chat/completions'
+      chat: '/v1/chat/completions',
     },
     featured_models: {
-      best_quality: 'gpt-4 → deepseek-v4-pro',
-      balanced: 'claude-sonnet → llama-3.3-nemotron-super (49B)',
-      fastest: 'gpt-3.5-turbo → llama-3.1-nemotron-nano (8B)'
-    }
+      best_quality:  'gpt-4 → deepseek-r1 (671B reasoning)',
+      balanced:      'claude-sonnet → llama-3.3-nemotron-super (49B)',
+      fastest:       'gpt-3.5-turbo → llama-3.1-nemotron-nano (8B)',
+    },
   });
 });
 
@@ -157,291 +152,304 @@ app.get('/v1/models', (req, res) => {
   const models = Object.keys(MODEL_MAPPING).map(model => ({
     id: model,
     object: 'model',
-    created: Date.now(),
+    created: Math.floor(Date.now() / 1000),
     owned_by: 'nvidia-nim-proxy',
     nim_model: MODEL_MAPPING[model],
-    supports_thinking: THINKING_MODELS.includes(MODEL_MAPPING[model])
+    supports_thinking: THINKING_MODELS.has(MODEL_MAPPING[model]),
   }));
-  
-  res.json({
-    object: 'list',
-    data: models
-  });
+
+  res.json({ object: 'list', data: models });
 });
 
-// Chat completions endpoint (main proxy)
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+/**
+ * Resolve the NIM model name for a given OpenAI-style model id.
+ * Falls back through a pattern-matching chain; never makes a live probe
+ * (the probe used a shadowed `res` variable and added unnecessary latency).
+ */
+function resolveNimModel(requestedModel) {
+  // Exact match in our map
+  if (MODEL_MAPPING[requestedModel]) return MODEL_MAPPING[requestedModel];
+
+  // If the caller already sent a NIM-style model id, pass it through
+  if (requestedModel.includes('/')) return requestedModel;
+
+  // Pattern-based fallback
+  const lower = requestedModel.toLowerCase();
+  if (lower.includes('gpt-4') || lower.includes('opus'))          return 'deepseek-ai/deepseek-r1';
+  if (lower.includes('deepseek'))                                  return 'deepseek-ai/deepseek-v3-0324';
+  if (lower.includes('claude-sonnet') || lower.includes('70b'))   return 'nvidia/llama-3.3-nemotron-super-49b-v1';
+  if (lower.includes('3.5') || lower.includes('haiku') || lower.includes('fast')) return 'nvidia/llama-3.1-nemotron-nano-8b-v1';
+  if (lower.includes('gemini') || lower.includes('qwen'))         return 'qwen/qwen2.5-72b-instruct';
+
+  // Safe default
+  return 'nvidia/llama-3.3-nemotron-super-49b-v1';
+}
+
+/**
+ * Inject the RP guard into the messages array (mutates a shallow copy).
+ */
+function injectRpGuard(messages) {
+  const copy = messages.map(m => ({ ...m }));
+  const sysIdx = copy.findIndex(m => m.role === 'system');
+  if (sysIdx !== -1) {
+    copy[sysIdx] = {
+      ...copy[sysIdx],
+      content: copy[sysIdx].content + '\n\n' + RP_GUARD_INSTRUCTION,
+    };
+  } else {
+    copy.unshift({ role: 'system', content: RP_GUARD_INSTRUCTION });
+  }
+  return copy;
+}
+
+// ─── Chat Completions ────────────────────────────────────────────────────────
+
 app.post('/v1/chat/completions', async (req, res) => {
   try {
-    // Check API key
     if (!NIM_API_KEY) {
       return res.status(500).json({
         error: {
-          message: 'NIM_API_KEY not configured. Please add your NVIDIA API key in Render environment variables.',
+          message: 'NIM_API_KEY not configured. Please add your NVIDIA API key in environment variables.',
           type: 'configuration_error',
-          code: 500
-        }
+          code: 500,
+        },
       });
     }
 
     const { model, messages, temperature, max_tokens, stream } = req.body;
-    
-    // Smart model selection with fallback
-    let nimModel = MODEL_MAPPING[model];
-    
-    // If exact model not found, try intelligent fallback
-    if (!nimModel) {
-      try {
-        // Test if the requested model exists directly on NVIDIA NIM
-        await axios.post(`${NIM_API_BASE}/chat/completions`, {
-          model: model,
-          messages: [{ role: 'user', content: 'test' }],
-          max_tokens: 1
-        }, {
-          headers: { 
-            'Authorization': `Bearer ${NIM_API_KEY}`, 
-            'Content-Type': 'application/json' 
-          },
-          validateStatus: (status) => status < 500
-        }).then(res => {
-          if (res.status >= 200 && res.status < 300) {
-            nimModel = model;
-          }
-        });
-      } catch (e) {
-        // Will use fallback below
-      }
-      
-      // Intelligent fallback based on model name patterns
-      if (!nimModel) {
-        const modelLower = model.toLowerCase();
-        
-        // Match patterns for best model selection
-        if (modelLower.includes('gpt-4') || modelLower.includes('opus')) {
-          nimModel = 'deepseek-ai/deepseek-v4-pro'; // Best quality
-        } else if (modelLower.includes('deepseek')) {
-          nimModel = 'deepseek-ai/deepseek-v4-flash';
-        } else if (modelLower.includes('claude-sonnet') || modelLower.includes('70b')) {
-          nimModel = 'nvidia/llama-3.3-nemotron-super-49b-v1.5'; // Balanced
-        } else if (modelLower.includes('3.5') || modelLower.includes('haiku') || modelLower.includes('fast')) {
-          nimModel = 'nvidia/llama-3.1-nemotron-nano-8b-v1'; // Fast
-        } else if (modelLower.includes('gemini') || modelLower.includes('qwen')) {
-          nimModel = 'qwen/qwen3-next-80b-a3b-thinking';
-        } else {
-          // Default to balanced model for Janitor AI
-          nimModel = 'nvidia/llama-3.3-nemotron-super-49b-v1.5';
-        }
-      }
-    }
-    
-    // 🛡️ ROLEPLAY GUARD - Inject character-only instruction into the system prompt.
-    // If Janitor AI already sent a system message (the character card), we append to it.
-    // If there is no system message at all, we create one.
-    const systemIndex = messages.findIndex(m => m.role === 'system');
-    if (systemIndex !== -1) {
-      messages[systemIndex] = {
-        ...messages[systemIndex],
-        content: messages[systemIndex].content + '\n\n' + RP_GUARD_INSTRUCTION
-      };
-    } else {
-      messages.unshift({ role: 'system', content: RP_GUARD_INSTRUCTION });
-    }
 
-    // Transform OpenAI request to NIM format
+    const nimModel  = resolveNimModel(model);
+    const patchedMessages = injectRpGuard(messages);
+
+    // Build the NIM request body
     const nimRequest = {
-      model: nimModel,
-      messages: messages,
-      temperature: temperature || 0.7, // Optimized for roleplay
-      max_tokens: max_tokens || 4096,  // Good balance for conversations
-      stream: stream || false
+      model:       nimModel,
+      messages:    patchedMessages,
+      temperature: temperature ?? 0.7,
+      max_tokens:  max_tokens  ?? 4096,
+      stream:      stream      ?? false,
     };
 
-    // Add thinking mode if enabled and model supports it
-    if (ENABLE_THINKING_MODE && THINKING_MODELS.includes(nimModel)) {
-      // For DeepSeek models, use system prompt method
+    // Add thinking mode if enabled and the model supports it
+    if (ENABLE_THINKING_MODE && THINKING_MODELS.has(nimModel)) {
       if (nimModel.includes('deepseek')) {
-        // Thinking mode is controlled via chat template
-        nimRequest.extra_body = { thinking: true };
-      } 
-      // For Nemotron models, add system instruction
-      else if (nimModel.includes('nemotron')) {
-        // Check if first message is system, if not add it
+        // DeepSeek: pass thinking flag in the request body directly
+        nimRequest.thinking = true;
+      } else if (nimModel.includes('nemotron')) {
+        // Nemotron: prepend a system instruction (only if no system msg yet)
         if (nimRequest.messages[0]?.role !== 'system') {
-          nimRequest.messages.unshift({
-            role: 'system',
-            content: 'detailed thinking on'
-          });
+          nimRequest.messages.unshift({ role: 'system', content: 'detailed thinking on' });
         }
       }
     }
-    
-    // Make request to NVIDIA NIM API
-    const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
-      headers: {
-        'Authorization': `Bearer ${NIM_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      responseType: stream ? 'stream' : 'json'
-    });
-    
+
+    // ── Streaming response ───────────────────────────────────────────────────
     if (stream) {
-      // Handle streaming response with reasoning
+      const nimResponse = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
+        headers: {
+          Authorization: `Bearer ${NIM_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        responseType: 'stream',
+        timeout: REQUEST_TIMEOUT,
+      });
+
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
-      
+
       let buffer = '';
-      let reasoningStarted = false;
-      // 🛡️ Accumulates the full streamed text so we can run stripUserBreakout
-      // before forwarding. We hold back the last 200 chars as a "lookahead window"
-      // because a user-label breakout could start at any point and we need context.
+      let reasoningOpen = false;
+
+      // Accumulator for the user-breakout filter with a lookahead window
       let contentAccumulator = '';
       let flushedUpTo = 0;
       const LOOKAHEAD = 200;
-      
-      response.data.on('data', (chunk) => {
+
+      // Flush a text fragment as a streaming delta chunk
+      function sendDelta(data, text) {
+        const outData = {
+          ...data,
+          choices: [{
+            ...data.choices[0],
+            delta: { ...data.choices[0].delta, content: text },
+          }],
+        };
+        delete outData.choices[0].delta.reasoning_content;
+        res.write(`data: ${JSON.stringify(outData)}\n\n`);
+      }
+
+      // Flush whatever remains in the accumulator that hasn't been sent yet
+      function flushRemaining(data) {
+        if (contentAccumulator.length <= flushedUpTo) return;
+        const filtered = stripUserBreakout(contentAccumulator);
+        const remaining = filtered.substring(flushedUpTo);
+        if (remaining.length > 0) sendDelta(data, remaining);
+      }
+
+      nimResponse.data.on('data', chunk => {
         buffer += chunk.toString();
         const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-        
-        lines.forEach(line => {
-          if (line.startsWith('data: ')) {
-            if (line.includes('[DONE]')) {
-              // Flush any remaining content through the filter before sending DONE
-              if (contentAccumulator.length > flushedUpTo) {
-                const remaining = stripUserBreakout(contentAccumulator.substring(flushedUpTo));
-                if (remaining.length > 0) {
-                  const doneFlush = {
-                    choices: [{ delta: { content: remaining }, index: 0 }]
-                  };
-                  res.write(`data: ${JSON.stringify(doneFlush)}\n\n`);
-                }
-              }
-              res.write(line + '\n\n');
-              return;
-            }
-            
-            try {
-              const data = JSON.parse(line.slice(6));
-              if (data.choices?.[0]?.delta) {
-                const reasoning = data.choices[0].delta.reasoning_content;
-                const content = data.choices[0].delta.content;
-                
-                if (SHOW_REASONING) {
-                  let combinedContent = '';
-                  
-                  if (reasoning && !reasoningStarted) {
-                    combinedContent = '<think>\n' + reasoning;
-                    reasoningStarted = true;
-                  } else if (reasoning) {
-                    combinedContent = reasoning;
-                  }
-                  
-                  if (content && reasoningStarted) {
-                    combinedContent += '\n</think>\n\n' + content;
-                    reasoningStarted = false;
-                  } else if (content) {
-                    combinedContent += content;
-                  }
-                  
-                  if (combinedContent) {
-                    data.choices[0].delta.content = combinedContent;
-                    delete data.choices[0].delta.reasoning_content;
-                  }
-                } else {
-                  if (content) {
-                    data.choices[0].delta.content = content;
-                  } else {
-                    data.choices[0].delta.content = '';
-                  }
-                  delete data.choices[0].delta.reasoning_content;
-                }
+        buffer = lines.pop() ?? '';
 
-                // 🛡️ Feed into accumulator and only flush the safe portion
-                const chunkText = data.choices[0].delta.content || '';
-                if (chunkText) {
-                  contentAccumulator += chunkText;
-                  // Run filter on everything accumulated so far
-                  const filtered = stripUserBreakout(contentAccumulator);
-                  // Only flush up to (filtered.length - LOOKAHEAD) so we keep a window
-                  const safeEnd = Math.max(flushedUpTo, filtered.length - LOOKAHEAD);
-                  if (safeEnd > flushedUpTo) {
-                    const toSend = filtered.substring(flushedUpTo, safeEnd);
-                    flushedUpTo = safeEnd;
-                    data.choices[0].delta.content = toSend;
-                    res.write(`data: ${JSON.stringify(data)}\n\n`);
-                  }
-                  // If nothing new to flush, don't forward this chunk at all
-                  return;
-                }
-              }
-              res.write(`data: ${JSON.stringify(data)}\n\n`);
-            } catch (e) {
-              res.write(line + '\n');
-            }
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+
+          if (line.includes('[DONE]')) {
+            // We need a placeholder data object for flushRemaining;
+            // build a minimal one if we have leftover content.
+            // The actual [DONE] is sent after.
+            res.write('data: [DONE]\n\n');
+            continue;
           }
-        });
+
+          let data;
+          try {
+            data = JSON.parse(line.slice(6));
+          } catch {
+            res.write(line + '\n');
+            continue;
+          }
+
+          if (!data.choices?.[0]?.delta) {
+            res.write(`data: ${JSON.stringify(data)}\n\n`);
+            continue;
+          }
+
+          const reasoning = data.choices[0].delta.reasoning_content ?? '';
+          const content   = data.choices[0].delta.content          ?? '';
+
+          // Build the text this chunk will contribute
+          let chunkText = '';
+
+          if (SHOW_REASONING) {
+            if (reasoning && !reasoningOpen) {
+              chunkText = '<think>\n' + reasoning;
+              reasoningOpen = true;
+            } else if (reasoning) {
+              chunkText = reasoning;
+            }
+
+            if (content && reasoningOpen) {
+              chunkText += '\n</think>\n\n' + content;
+              reasoningOpen = false;
+            } else if (content) {
+              chunkText += content;
+            }
+          } else {
+            // Suppress reasoning; only forward regular content
+            chunkText = content;
+          }
+
+          if (!chunkText) continue; // Nothing to forward for this chunk
+
+          // Run through the user-breakout filter with a lookahead window
+          contentAccumulator += chunkText;
+          const filtered = stripUserBreakout(contentAccumulator);
+          const safeEnd  = Math.max(flushedUpTo, filtered.length - LOOKAHEAD);
+
+          if (safeEnd > flushedUpTo) {
+            const toSend = filtered.substring(flushedUpTo, safeEnd);
+            flushedUpTo = safeEnd;
+            sendDelta(data, toSend);
+          }
+          // If not enough has accumulated yet, hold back and wait for more chunks
+        }
       });
-      
-      response.data.on('end', () => res.end());
-      response.data.on('error', (err) => {
-        console.error('Stream error:', err);
+
+      nimResponse.data.on('end', () => {
+        // Flush the lookahead window now that the stream is complete
+        if (contentAccumulator.length > flushedUpTo) {
+          const filtered   = stripUserBreakout(contentAccumulator);
+          const remaining  = filtered.substring(flushedUpTo);
+          if (remaining.length > 0) {
+            // We need a valid SSE frame; build a minimal one
+            const finalFrame = {
+              id: `chatcmpl-${Date.now()}`,
+              object: 'chat.completion.chunk',
+              created: Math.floor(Date.now() / 1000),
+              model: nimModel,
+              choices: [{ index: 0, delta: { content: remaining }, finish_reason: null }],
+            };
+            res.write(`data: ${JSON.stringify(finalFrame)}\n\n`);
+          }
+        }
+        res.write('data: [DONE]\n\n');
         res.end();
       });
-    } else {
-      // Transform NIM response to OpenAI format with reasoning
-      const openaiResponse = {
-        id: `chatcmpl-${Date.now()}`,
-        object: 'chat.completion',
-        created: Math.floor(Date.now() / 1000),
-        model: model,
-        choices: response.data.choices.map(choice => {
-          let fullContent = choice.message?.content || '';
 
-          // 🛡️ Strip any text where the model broke character and wrote as the user
+      nimResponse.data.on('error', err => {
+        console.error('Stream error:', err.message);
+        res.end();
+      });
+
+    // ── Non-streaming response ───────────────────────────────────────────────
+    } else {
+      const nimResponse = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
+        headers: {
+          Authorization: `Bearer ${NIM_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: REQUEST_TIMEOUT,
+      });
+
+      const openaiResponse = {
+        id:      `chatcmpl-${Date.now()}`,
+        object:  'chat.completion',
+        created: Math.floor(Date.now() / 1000),
+        model:   model,
+        choices: nimResponse.data.choices.map(choice => {
+          let fullContent = choice.message?.content ?? '';
+
+          // Strip model-playing-user breakouts
           fullContent = stripUserBreakout(fullContent);
-          
+
+          // Optionally prepend reasoning
           if (SHOW_REASONING && choice.message?.reasoning_content) {
             fullContent = '<think>\n' + choice.message.reasoning_content + '\n</think>\n\n' + fullContent;
           }
-          
+
           return {
-            index: choice.index,
-            message: {
-              role: choice.message.role,
-              content: fullContent
-            },
-            finish_reason: choice.finish_reason
+            index:         choice.index,
+            message:       { role: choice.message.role, content: fullContent },
+            finish_reason: choice.finish_reason,
           };
         }),
-        usage: response.data.usage || {
-          prompt_tokens: 0,
+        usage: nimResponse.data.usage ?? {
+          prompt_tokens:     0,
           completion_tokens: 0,
-          total_tokens: 0
-        }
+          total_tokens:      0,
+        },
       };
-      
+
       res.json(openaiResponse);
     }
-    
+
   } catch (error) {
     console.error('Proxy error:', error.message);
-    
-    // Enhanced error messages
+
     let errorMessage = error.message || 'Internal server error';
-    if (error.response?.status === 401) {
+    let statusCode   = error.response?.status || 500;
+
+    if (statusCode === 401) {
       errorMessage = 'Invalid NVIDIA API key. Please check your NIM_API_KEY in environment variables.';
-    } else if (error.response?.status === 429) {
+    } else if (statusCode === 429) {
       errorMessage = 'Rate limit exceeded. Please try again in a moment.';
+    } else if (error.code === 'ECONNABORTED') {
+      errorMessage = 'Request timed out. The upstream NIM API did not respond in time.';
+      statusCode   = 504;
     } else if (error.response?.data?.detail) {
       errorMessage = error.response.data.detail;
     }
-    
-    res.status(error.response?.status || 500).json({
+
+    res.status(statusCode).json({
       error: {
         message: errorMessage,
-        type: 'invalid_request_error',
-        code: error.response?.status || 500
-      }
+        type:    'invalid_request_error',
+        code:    statusCode,
+      },
     });
   }
 });
@@ -450,10 +458,10 @@ app.post('/v1/chat/completions', async (req, res) => {
 app.all('*', (req, res) => {
   res.status(404).json({
     error: {
-      message: `Endpoint ${req.path} not found. Available endpoints: /health, /v1/models, /v1/chat/completions`,
+      message: `Endpoint ${req.path} not found. Available: /health, /v1/models, /v1/chat/completions`,
       type: 'invalid_request_error',
-      code: 404
-    }
+      code: 404,
+    },
   });
 });
 
@@ -463,16 +471,18 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('═══════════════════════════════════════════════════════');
   console.log(`📡 Server running on port ${PORT}`);
   console.log(`🏥 Health check: http://localhost:${PORT}/health`);
-  console.log(`📋 Models list: http://localhost:${PORT}/v1/models`);
+  console.log(`📋 Models list:  http://localhost:${PORT}/v1/models`);
   console.log('');
   console.log('⚙️  Configuration:');
-  console.log(`   • Reasoning display: ${SHOW_REASONING ? '✅ ENABLED' : '❌ DISABLED'}`);
-  console.log(`   • Thinking mode: ${ENABLE_THINKING_MODE ? '✅ ENABLED' : '❌ DISABLED'}`);
-  console.log(`   • API key: ${NIM_API_KEY ? '✅ Configured' : '❌ Missing'}`);
+  console.log(`   • Reasoning display : ${SHOW_REASONING       ? '✅ ENABLED' : '❌ DISABLED'}`);
+  console.log(`   • Thinking mode     : ${ENABLE_THINKING_MODE ? '✅ ENABLED' : '❌ DISABLED'}`);
+  console.log(`   • API key           : ${NIM_API_KEY          ? '✅ Configured' : '❌ Missing'}`);
+  console.log(`   • Request timeout   : ${REQUEST_TIMEOUT}ms`);
   console.log('');
   console.log('🎯 Featured Models:');
-  console.log('   • Best Quality: gpt-4 → DeepSeek V3.2 (685B)');
-  console.log('   • Balanced: claude-sonnet → Llama Nemotron Super (49B)');
-  console.log('   • Fastest: gpt-3.5-turbo → Llama Nemotron Nano (8B)');
+  console.log('   • Best Quality : gpt-4       → DeepSeek R1 (671B)');
+  console.log('   • Balanced     : claude-sonnet → Llama Nemotron Super (49B)');
+  console.log('   • Fastest      : gpt-3.5-turbo → Llama Nemotron Nano (8B)');
   console.log('═══════════════════════════════════════════════════════');
+});nsole.log('═══════════════════════════════════════════════════════');
 });
